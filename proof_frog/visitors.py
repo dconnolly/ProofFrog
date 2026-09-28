@@ -2,8 +2,10 @@ from __future__ import annotations
 import copy
 import functools
 import operator
+import weakref
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from types import MethodType
 from typing import (
     Any,
     Optional,
@@ -40,9 +42,11 @@ def _to_snake_case(camel_case: str) -> str:
 # ---------------------------------------------------------------------------
 
 _NOT_FOUND = object()
+_NOT_CACHED = object()
 
-# visitor_class -> node_class -> (visit_method | None, leave_method | None)
+# visitor_class -> node_class -> (weak visit_method | None, weak leave_method | None)
 _VISITOR_METHODS_CACHE: dict[type, dict[type, tuple[Any, Any]]] = {}
+_VISITOR_METHODS_CACHE_LIMIT = 128
 
 # Only fields that can contain AST nodes belong here. Unknown node classes
 # retain the dynamic walk, including any attributes added by their callers.
@@ -125,11 +129,32 @@ _CHILD_FIELDS: dict[type, tuple[str, ...]] = {
     ),
 }
 
-# (transformer_class, node_class) -> method | _NOT_FOUND
+# (transformer_class, node_class) -> weak method | _NOT_FOUND
 _TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
+_TRANSFORM_CACHE_LIMIT = 4096
 
-# transformer_class -> method | _NOT_FOUND
+# transformer_class -> weak method | _NOT_FOUND
 _TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
+_TRANSFORM_FALLBACK_CACHE_LIMIT = 128
+
+
+def _cache_method(method: Any) -> Any:
+    """Keep cached methods from retaining classes through their closures."""
+    if method is None or method is _NOT_FOUND:
+        return method
+    try:
+        if isinstance(method, MethodType):
+            return weakref.WeakMethod(method)
+        return weakref.ref(method)
+    except TypeError:
+        return _NOT_CACHED
+
+
+def _cached_method(cached: Any) -> Any:
+    if isinstance(cached, weakref.ReferenceType):
+        method = cached()
+        return _NOT_CACHED if method is None else method
+    return cached
 
 
 def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
@@ -150,15 +175,20 @@ def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
 
 
 def _visitor_methods(cls: type) -> dict[type, tuple[Any, Any]]:
-    """Build one dispatch table per visitor class."""
+    """Build a bounded dispatch table cache for visitor classes."""
     methods = _VISITOR_METHODS_CACHE.get(cls)
     if methods is None:
         methods = {}
         pending = [frog_ast.ASTNode]
         while pending:
             node_cls = pending.pop()
-            methods[node_cls] = _lookup_visitor_methods(cls, node_cls)
+            methods[node_cls] = tuple(
+                _cache_method(method)
+                for method in _lookup_visitor_methods(cls, node_cls)
+            )
             pending.extend(node_cls.__subclasses__())
+        if len(_VISITOR_METHODS_CACHE) >= _VISITOR_METHODS_CACHE_LIMIT:
+            _VISITOR_METHODS_CACHE.pop(next(iter(_VISITOR_METHODS_CACHE)))
         _VISITOR_METHODS_CACHE[cls] = methods
     return methods
 
@@ -172,22 +202,30 @@ def _child_fields(node: frog_ast.ASTNode) -> tuple[str, ...]:
 def _lookup_transform(cls: type, node_cls: type) -> Any:
     """Look up transform method for a (transformer_class, node_class) pair."""
     key = (cls, node_cls)
-    cached = _TRANSFORM_CACHE.get(key)
-    if cached is not None:
+    cached = _cached_method(_TRANSFORM_CACHE.get(key, _NOT_CACHED))
+    if cached is not _NOT_CACHED:
         return cached
     snake = _to_snake_case(node_cls.__name__)
     method = getattr(cls, "transform_" + snake, _NOT_FOUND)
-    _TRANSFORM_CACHE[key] = method
+    cache_value = _cache_method(method)
+    if cache_value is not _NOT_CACHED:
+        if len(_TRANSFORM_CACHE) >= _TRANSFORM_CACHE_LIMIT:
+            _TRANSFORM_CACHE.pop(next(iter(_TRANSFORM_CACHE)))
+        _TRANSFORM_CACHE[key] = cache_value
     return method
 
 
 def _lookup_transform_fallback(cls: type) -> Any:
     """Look up transform_ast_node fallback for a transformer class."""
-    cached = _TRANSFORM_FALLBACK_CACHE.get(cls)
-    if cached is not None:
+    cached = _cached_method(_TRANSFORM_FALLBACK_CACHE.get(cls, _NOT_CACHED))
+    if cached is not _NOT_CACHED:
         return cached
     method = getattr(cls, "transform_ast_node", _NOT_FOUND)
-    _TRANSFORM_FALLBACK_CACHE[cls] = method
+    cache_value = _cache_method(method)
+    if cache_value is not _NOT_CACHED:
+        if len(_TRANSFORM_FALLBACK_CACHE) >= _TRANSFORM_FALLBACK_CACHE_LIMIT:
+            _TRANSFORM_FALLBACK_CACHE.pop(next(iter(_TRANSFORM_FALLBACK_CACHE)))
+        _TRANSFORM_FALLBACK_CACHE[cls] = cache_value
     return method
 
 
@@ -233,13 +271,23 @@ class Visitor(ABC, Generic[U]):
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
         dispatch = _visitor_methods(type(self))
+        resolved_dispatch: dict[type, tuple[Any, Any]] = {}
 
         def visit_helper(node: frog_ast.ASTNode) -> None:
             node_cls = type(node)
-            methods = dispatch.get(node_cls)
+            methods = resolved_dispatch.get(node_cls)
             if methods is None:
-                methods = _lookup_visitor_methods(type(self), node_cls)
-                dispatch[node_cls] = methods
+                cached_methods = dispatch.get(node_cls)
+                if cached_methods is None:
+                    methods = _lookup_visitor_methods(type(self), node_cls)
+                    dispatch[node_cls] = tuple(
+                        _cache_method(method) for method in methods
+                    )
+                else:
+                    methods = tuple(_cached_method(method) for method in cached_methods)
+                    if any(method is _NOT_CACHED for method in methods):
+                        methods = _lookup_visitor_methods(type(self), node_cls)
+                resolved_dispatch[node_cls] = methods
             visit_method, leave_method = methods
 
             if visit_method is not None:
@@ -1700,6 +1748,20 @@ def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
+    def __init__(self) -> None:
+        self.variables: list[frog_ast.Variable] = []
+        self.seen: set[str] = set()
+
+    def result(self) -> list[frog_ast.Variable]:
+        return self.variables
+
+    def visit_variable(self, inner: frog_ast.Variable) -> None:
+        if inner.name not in self.seen:
+            self.seen.add(inner.name)
+            self.variables.append(inner)
+
+
 def referenced_variables_in_order(
     node: frog_ast.ASTNode,
 ) -> list[frog_ast.Variable]:
@@ -1707,19 +1769,6 @@ def referenced_variables_in_order(
     deduplicated by name -- the FieldAccess-complete analogue of
     :class:`VariableCollectionVisitor`.  Used where iteration order is
     observable (e.g. dependency-edge order)."""
-
-    class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
-        def __init__(self) -> None:
-            self.variables: list[frog_ast.Variable] = []
-            self.seen: set[str] = set()
-
-        def result(self) -> list[frog_ast.Variable]:
-            return self.variables
-
-        def visit_variable(self, inner: frog_ast.Variable) -> None:
-            if inner.name not in self.seen:
-                self.seen.add(inner.name)
-                self.variables.append(inner)
 
     return _OrderedReferenceVisitor().visit(node)
 

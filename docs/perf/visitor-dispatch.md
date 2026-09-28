@@ -84,3 +84,34 @@ with 2,916 tests and 6 skips. The four KEM proofs and
 `DDH_implies_CDH.proof` succeeded with byte-identical CLI output before and
 after. `make lint` passed (black, mypy, pylint, and TypeScript). The
 map-reindex tests passed after the `Hashable` import change (23 tests).
+
+## Fix
+
+The review found that 1,000 calls to `referenced_variables_in_order` left
+1,000 visitor tables and 65,000 dispatch entries in this branch. The helper
+defined its visitor class on every call. Four other production helpers also
+defined visitor classes inside functions. All five visitor classes now live at
+module scope.
+
+The visitor cache now holds at most 128 class tables. The transformer lookup
+caches hold at most 4,096 method entries and 128 fallback entries. Cached
+methods use weak references so a method that closes over its class cannot
+keep that class alive through the cache value. A callable that cannot be
+weakly referenced is resolved without caching. After 1,000 and 2,000 calls
+to `referenced_variables_in_order`, the cache held one table with 65 entries
+both times. A regression test also creates transient visitor and transformer
+classes and checks that evicted classes can be collected.
+
+Two runs of `bench/pivot_inline_bench.sh` on the shared CPU gave these times:
+
+| Version | Wall times (seconds) | Process user times (seconds) |
+| --- | --- | --- |
+| Before fix | 22.44, 22.32 | 21.17, 20.96 |
+| After fix | 24.34, 22.46 | 22.70, 20.87 |
+
+The second post-fix run matched the baseline range. The first took about two
+seconds longer; the shared CPU limits what two samples can establish.
+The pivot CLI returned success, and its JSON output matched the pre-fix output
+byte for byte (SHA-256
+`9c53aa91fc2bfd0c00401deb37ca3a81e231127372dee8ed6452b5ce84776ca2`).
+`pytest tests -q -x` passed with 2,918 tests and 6 skips. `make lint` passed.
