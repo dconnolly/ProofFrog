@@ -48,6 +48,7 @@ Each rewrite replaces an expression with a literal of the same value on every ex
 
 - **Negation.** `!true` is `false` and `!false` is `true` in every Boolean model.
 - **Integer order.** The type checker accepts `<`, `>`, `<=`, `>=` only on `Int` operands.
+  It rejects them on `ModInt<q>`, so no ordered literal comes from a modular slot.
   Two `Int` literals compare as Python integers, so the pass uses Python's comparison.
 - **Integer equality.** An `Int` literal may flow into a `ModInt<q>` slot (the type checker accepts the coercion) and later be inlined into an equality.
   Mod `q`, distinct literals can be equal (`5 == 0` in `ModInt<5>`).
@@ -75,6 +76,10 @@ Each decision rests on the syntax of the literal operands.
   - Literal conditions that select the other branch are rejected.
   - `[x, b] != None` guarding a `return None` is rejected against the unguarded game.
   - `None == y` with `y` an `Int?` argument is not folded; the pair is rejected.
+  - `Bool? v` set to `None` or `false` on every path: `v != true` folds, and the game equals one that returns the first branch.
+    Upstream `main` rejects this pair.
+  - The same guard on a `Bool?` argument is not folded; the pair is rejected.
+- `tests/unit/typechecking/test_modint_type_checking.py`: `<`, `>`, `<=`, `>=` on `ModInt<q>` fail type checking, against a `ModInt<q>` or an `Int` literal.
 
 The motivating toy (`ToyUnfold.proof`, an eight-step unfold of a KEM+AEAD protocol) failed steps 1 and 8.
 With this pass all eight steps pass.

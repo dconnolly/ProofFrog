@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Any, Sequence
+import operator
+from typing import Any, Callable, Sequence
 
 import z3
 
@@ -56,13 +57,13 @@ _NON_NONE_LITERALS = (
     frog_ast.BitStringLiteral,
 )
 
-_LITERAL_RELATIONS = {
-    frog_ast.BinaryOperators.EQUALS: lambda a, b: a == b,
-    frog_ast.BinaryOperators.NOTEQUALS: lambda a, b: a != b,
-    frog_ast.BinaryOperators.LT: lambda a, b: a < b,
-    frog_ast.BinaryOperators.GT: lambda a, b: a > b,
-    frog_ast.BinaryOperators.LEQ: lambda a, b: a <= b,
-    frog_ast.BinaryOperators.GEQ: lambda a, b: a >= b,
+_LITERAL_RELATIONS: dict[frog_ast.BinaryOperators, Callable[[Any, Any], bool]] = {
+    frog_ast.BinaryOperators.EQUALS: operator.eq,
+    frog_ast.BinaryOperators.NOTEQUALS: operator.ne,
+    frog_ast.BinaryOperators.LT: operator.lt,
+    frog_ast.BinaryOperators.GT: operator.gt,
+    frog_ast.BinaryOperators.LEQ: operator.le,
+    frog_ast.BinaryOperators.GEQ: operator.ge,
 }
 
 
