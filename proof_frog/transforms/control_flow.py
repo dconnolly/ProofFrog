@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Any, Sequence
+from operator import eq, ge, gt, le, lt, ne
+from typing import Any, Callable, Sequence
 
 import z3
 
@@ -45,6 +46,87 @@ from ._base import (
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+_NON_NONE_LITERALS = (
+    frog_ast.Tuple,
+    frog_ast.Set,
+    frog_ast.Integer,
+    frog_ast.Boolean,
+    frog_ast.BinaryNum,
+    frog_ast.BitStringLiteral,
+)
+
+_LITERAL_RELATIONS: dict[frog_ast.BinaryOperators, Callable[[Any, Any], bool]] = {
+    frog_ast.BinaryOperators.EQUALS: eq,
+    frog_ast.BinaryOperators.NOTEQUALS: ne,
+    frog_ast.BinaryOperators.LT: lt,
+    frog_ast.BinaryOperators.GT: gt,
+    frog_ast.BinaryOperators.LEQ: le,
+    frog_ast.BinaryOperators.GEQ: ge,
+}
+
+
+class FoldLiteralConditionsTransformer(Transformer):
+    """Folds comparisons whose value is fixed by literal operands.
+
+    - ``!true`` / ``!false`` becomes ``false`` / ``true``.
+    - ``<``, ``>``, ``<=``, ``>=`` on two ``Integer`` literals folds.
+      These operators type-check only on ``Int``.
+    - ``==`` / ``!=`` on two ``Boolean`` literals folds.
+    - ``==`` / ``!=`` on two ``Integer`` literals folds only when the values
+      are equal. A literal inlined into a ``ModInt<q>`` slot compares mod
+      ``q``, so distinct literals may still be equal.
+    - ``None == L`` / ``L == None`` (and ``!=``) folds to ``false`` / ``true``
+      when ``L`` is a tuple, set, integer, boolean, or bitstring literal
+      that makes no call and indexes nothing, so dropping its evaluation has
+      no effect. ``None`` against a variable or call never folds.
+    """
+
+    def transform_unary_operation(
+        self, unary_op: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(unary_op)
+        if new_op.operator == frog_ast.UnaryOperators.NOT and isinstance(
+            new_op.expression, frog_ast.Boolean
+        ):
+            return frog_ast.Boolean(not new_op.expression.bool)
+        return new_op
+
+    def transform_binary_operation(
+        self, binary_op: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(binary_op)
+        op = new_op.operator
+        if op not in _LITERAL_RELATIONS:
+            return new_op
+        left = new_op.left_expression
+        right = new_op.right_expression
+        relation = _LITERAL_RELATIONS[op]
+        is_eq = op in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        )
+        if isinstance(left, frog_ast.Integer) and isinstance(right, frog_ast.Integer):
+            if is_eq and left.num != right.num:
+                return new_op
+            return frog_ast.Boolean(relation(left.num, right.num))
+        if not is_eq:
+            return new_op
+        if isinstance(left, frog_ast.Boolean) and isinstance(right, frog_ast.Boolean):
+            return frog_ast.Boolean(relation(left.bool, right.bool))
+        if isinstance(left, frog_ast.NoneExpression):
+            other = right
+        elif isinstance(right, frog_ast.NoneExpression):
+            other = left
+        else:
+            return new_op
+        if isinstance(other, _NON_NONE_LITERALS) and not any(
+            isinstance(node, (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice))
+            for node in _walk_nodes(other)
+        ):
+            return frog_ast.Boolean(op == frog_ast.BinaryOperators.NOTEQUALS)
+        return new_op
 
 
 class BranchEliminiationTransformer(BlockTransformer):
@@ -3362,6 +3444,13 @@ class FoldEquivalentReturnBranch(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return FoldEquivalentReturnBranchTransformer(ctx, game).transform(game)
+
+
+class FoldLiteralConditions(TransformPass):
+    name = "Fold Literal Conditions"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldLiteralConditionsTransformer().transform(game)
 
 
 class BranchElimination(TransformPass):
