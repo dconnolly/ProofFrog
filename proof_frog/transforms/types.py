@@ -12,17 +12,39 @@ from typing import Optional
 
 from .. import frog_ast
 from ..visitors import (
+    SearchVisitor,
     Transformer,
     BlockTransformer,
     NameTypeMap,
     build_game_type_map,
     MethodScopedTypeMapMixin,
+    lvalue_base_name,
 )
 from ._base import TransformPass, PipelineContext
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+def _may_write(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *node* or any statement nested in it may write *name*.
+
+    Counts assignments, samples, element writes, and ``for`` binders.
+    """
+
+    def writes(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return lvalue_base_name(inner.var) == name
+        if isinstance(inner, frog_ast.NumericFor):
+            return inner.name == name
+        if isinstance(inner, frog_ast.GenericFor):
+            return inner.var_name == name
+        return False
+
+    return SearchVisitor[frog_ast.ASTNode](writes).visit(node) is not None
 
 
 class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
@@ -49,51 +71,45 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         self.proof_instantiables = proof_instantiables or {}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Pre-pass: for nullable declarations `T? v = expr` where expr is
-        # provably non-nullable, record v as effectively non-null.
-        # But invalidate if the variable is later reassigned.
+        # A nullable declaration `T? v = expr` with a provably non-nullable
+        # expr makes v non-null for the guards after it, unless a later
+        # statement, at any depth, may write v.
         non_null_locals: set[str] = set()
-        for stmt in block.statements:
-            if (
-                isinstance(stmt, frog_ast.Assignment)
-                and stmt.the_type is not None
-                and isinstance(stmt.the_type, frog_ast.OptionalType)
-                and isinstance(stmt.var, frog_ast.Variable)
-                and stmt.value is not None
-                and self._is_nonnullable_expr(stmt.value)
-            ):
-                non_null_locals.add(stmt.var.name)
-            elif (
-                isinstance(
-                    stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-                )
-                and isinstance(stmt.var, frog_ast.Variable)
-                and stmt.var.name in non_null_locals
-                and (not isinstance(stmt, frog_ast.Assignment) or stmt.the_type is None)
-            ):
-                # Variable is reassigned (untyped assignment, sample, or
-                # unique sample) — it may now be nullable.
-                non_null_locals.discard(stmt.var.name)
-
         new_statements: list[frog_ast.Statement] = []
-        for statement in block.statements:
+        for index, statement in enumerate(block.statements):
             if isinstance(statement, frog_ast.IfStatement) and self._is_dead_null_guard(
                 statement, non_null_locals
             ):
                 continue
             new_statements.append(statement)
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.the_type, frog_ast.OptionalType)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.value is not None
+                and self._is_nonnullable_expr(statement.value)
+                and not any(
+                    _may_write(later, statement.var.name)
+                    for later in block.statements[index + 1 :]
+                )
+            ):
+                non_null_locals.add(statement.var.name)
         return frog_ast.Block(new_statements)
 
     def _is_nonnullable_expr(self, expr: frog_ast.ASTNode) -> bool:
         """Return True if expr is provably non-nullable.
 
         Handles:
+        - Tuple literals.
         - Variables with non-nullable type in type_map.
         - Method calls obj.method(args) where obj is a known instantiable
           and method's declared return type is not Optional.
         """
         if isinstance(expr, frog_ast.NoneExpression):
             return False
+        # A tuple literal is never None.
+        if isinstance(expr, frog_ast.Tuple):
+            return True
         if isinstance(expr, frog_ast.Variable):
             t = self.type_map.get(expr.name)
             return t is not None and not isinstance(t, frog_ast.OptionalType)
