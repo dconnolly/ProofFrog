@@ -21,6 +21,7 @@ from proof_frog.transforms.control_flow import (
     IfFalseReturnToConjunction,
 )
 from proof_frog.transforms.inlining import (
+    IfSplitBranchAssignment,
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
@@ -2714,3 +2715,34 @@ def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
     result = LocalFunctionFieldToLet().apply(game, ctx)
     assert result == game
     assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))
+
+
+def test_if_split_near_miss_nested_leaf_unassigned():
+    """IfSplitBranchAssignment reports a near-miss when one nested leaf does
+    not assign the variable the other leaves assign and the tail reads."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Initialize() {
+                return 0;
+            }
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        b = b + 1;
+                    }
+                }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfSplitBranchAssignment().apply(game, ctx)
+    assert result == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "If-Split Branch Assignment"
