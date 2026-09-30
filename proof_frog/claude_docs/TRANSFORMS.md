@@ -119,6 +119,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |
 | BranchElimination | Eliminates branches with statically known `true`/`false` conditions. |
+| GuardConditionSimplification | Replaces a deterministic if-condition by `true`/`false` inside its branches when the branch writes none of its variables. A membership guard `x in S` (or `!(x in S)`) also holds after an early return (`if (x in S) { return ...; }` makes it false afterward) and within a branch, up to the first write to `x` or `S` (plain, element/field, `<-uniq[S]`, loop binder, re-declaration). |
 | UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
 | ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |
 | SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |

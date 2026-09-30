@@ -17,6 +17,7 @@ import z3
 
 from .. import frog_ast
 from ..visitors import (
+    T,
     Transformer,
     Visitor,
     BlockTransformer,
@@ -577,6 +578,14 @@ class GuardConditionSimplificationTransformer(Transformer):
     This collapses redundant re-tests of a membership/boolean guard -- e.g.
     when a reduction gates an oracle call on a set membership that the
     oracle itself also checks.
+
+    A membership guard ``x in S`` (or its negation) also yields a fact after
+    an early return: following ``if (x in S) { ...; return R; }``, ``x in S``
+    is false.
+    A membership fact holds up to the first statement that writes a variable
+    it reads (plain, element or field write, ``<-uniq`` insertion, loop
+    binder, re-declaration); an if-else that writes one still gets the fact
+    in its conditions and in each branch up to that branch's first write.
     """
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
@@ -606,18 +615,111 @@ class GuardConditionSimplificationTransformer(Transformer):
             )
         )
 
-    def _substitute(
-        self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
-    ) -> frog_ast.Block:
+    @staticmethod
+    def _substitute(node: T, cond: frog_ast.Expression, value: bool) -> T:
         replace_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
         replace_map.set(copy.deepcopy(cond), frog_ast.Boolean(value))
-        return SubstitutionTransformer(replace_map).transform(block)
+        return SubstitutionTransformer(replace_map).transform(node)
+
+    def _membership_literal(
+        self, cond: frog_ast.Expression
+    ) -> tuple[frog_ast.Expression, bool] | None:
+        """``(x in S, polarity)`` for a deterministic guard ``x in S`` or
+        ``!(x in S)``; None for any other guard."""
+        base = cond
+        polarity = True
+        while (
+            isinstance(base, frog_ast.UnaryOperation)
+            and base.operator == frog_ast.UnaryOperators.NOT
+        ):
+            base = base.expression
+            polarity = not polarity
+        if not (
+            isinstance(base, frog_ast.BinaryOperation)
+            and base.operator == frog_ast.BinaryOperators.IN
+            and self._is_deterministic(base)
+        ):
+            return None
+        return base, polarity
+
+    def _substitute_until_write(
+        self,
+        statements: Sequence[frog_ast.Statement],
+        fact: frog_ast.Expression,
+        value: bool,
+    ) -> list[frog_ast.Statement]:
+        """Replace *fact* by *value* in *statements* up to the first one that
+        writes a variable *fact* reads.
+
+        That statement keeps the fact in its if-conditions and in each branch
+        up to the branch's own first write; statements after it keep none.
+        """
+        names = referenced_variable_names(fact)
+        out: list[frog_ast.Statement] = []
+        for index, statement in enumerate(statements):
+            if not reassigns_or_rebinds(names, statement):
+                out.append(self._substitute(statement, fact, value))
+                continue
+            if isinstance(statement, frog_ast.IfStatement):
+                statement = frog_ast.IfStatement(
+                    [self._substitute(c, fact, value) for c in statement.conditions],
+                    [
+                        frog_ast.Block(
+                            self._substitute_until_write(b.statements, fact, value)
+                        )
+                        for b in statement.blocks
+                    ],
+                )
+            out.append(statement)
+            rest = list(statements[index + 1 :])
+            if (
+                SearchVisitor(lambda n: n == fact).visit(frog_ast.Block(rest))
+                is not None
+            ):
+                self._note_unstable_guard(fact)
+            out.extend(rest)
+            break
+        return out
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = [self.transform(s) for s in block.statements]
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and len(statement.conditions) == 1
+                and not statement.has_else_block()
+                and block_unconditionally_returns(statement.blocks[0])
+            ):
+                continue
+            literal = self._membership_literal(statement.conditions[0])
+            if literal is None:
+                continue
+            fact, polarity = literal
+            statements[index + 1 :] = self._substitute_until_write(
+                statements[index + 1 :], fact, not polarity
+            )
+        return frog_ast.Block(statements)
 
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement
     ) -> frog_ast.IfStatement:
         new_blocks = list(if_statement.blocks)
-        if len(if_statement.conditions) == 1:
+        membership = (
+            self._membership_literal(if_statement.conditions[0])
+            if len(if_statement.conditions) == 1
+            else None
+        )
+        if membership is not None:
+            fact, polarity = membership
+            new_blocks = [
+                frog_ast.Block(
+                    self._substitute_until_write(
+                        blk.statements, fact, polarity if i == 0 else not polarity
+                    )
+                )
+                for i, blk in enumerate(new_blocks)
+            ]
+        elif len(if_statement.conditions) == 1:
             cond = if_statement.conditions[0]
             if self._is_deterministic(cond) and not isinstance(cond, frog_ast.Boolean):
                 cond_vars = referenced_variable_names(cond)
