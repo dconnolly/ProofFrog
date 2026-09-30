@@ -120,6 +120,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |
 | FoldLiteralConditions | Folds `!true`/`!false`, `<`/`>`/`<=`/`>=` on integer literals, `==`/`!=` on boolean literals or equal integer literals, and `None == L` / `None != L` when `L` is a call-free, index-free tuple, set, integer, boolean, or bitstring literal. Runs just before BranchElimination. |
 | BranchElimination | Eliminates branches with statically known `true`/`false` conditions. |
+| GuardConditionSimplification | Replaces a deterministic if-condition by `true`/`false` inside its branches when the branch writes none of its variables. A membership guard `x in S` (or `!(x in S)`) also holds after an early return (`if (x in S) { return ...; }` makes it false afterward) and within a branch, up to the first write to `x` or `S` (plain, element/field, `<-uniq[S]`, loop binder, re-declaration). |
 | UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
 | ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |
 | SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |

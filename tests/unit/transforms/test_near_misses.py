@@ -17,6 +17,7 @@ from proof_frog.transforms.control_flow import (
     RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
+    GuardConditionSimplificationTransformer,
     IfToBooleanAssignment,
     IfFalseReturnToConjunction,
 )
@@ -2746,3 +2747,25 @@ def test_if_split_near_miss_nested_leaf_unassigned():
     misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
     assert len(misses) == 1
     assert misses[0].transform_name == "If-Split Branch Assignment"
+
+
+def test_guard_condition_near_miss_membership_fact_killed_by_write():
+    """GuardConditionSimplification reports a near-miss when a write to S
+    between an early return on `x in S` and a re-test kills the fact."""
+    method = frog_parser.parse_method("""
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            S = S union d;
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+        """)
+    ctx = _make_ctx()
+    GuardConditionSimplificationTransformer(ctx).transform(method)
+    misses = [nm for nm in ctx.near_misses if nm.variable == "e in S"]
+    assert misses
+    assert misses[0].transform_name == "Guard Condition Simplification"
