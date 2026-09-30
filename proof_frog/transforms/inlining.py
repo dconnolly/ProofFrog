@@ -470,17 +470,21 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
     """Moves subsequent statements into if-else branches when all branches
     assign the same variable.
 
-    When an if-else has every branch ending with an assignment to the same
+    When an if-else has every leaf ending with an assignment to the same
     variable ``x``, and subsequent statements use ``x`` without reassigning
-    it, those subsequent statements are moved into each branch with ``x``
-    replaced by the branch's assigned value.
+    it, those subsequent statements are moved into each leaf with ``x``
+    replaced by the leaf's assigned value.
+    A leaf is a branch's trailing assignment, or recursively a leaf of a
+    trailing if-else in that branch (the shape inlined early returns take).
+    Each leaf assignment is the last statement on its path before the tail.
 
     Example::
 
-        if (C) { x = A; } else { x = B; }
+        if (C) { x = A; } else { y = y + 1; if (D) { x = B; } else { x = E; } }
         return f(x);
       becomes:
-        if (C) { return f(A); } else { return f(B); }
+        if (C) { return f(A); }
+        else { y = y + 1; if (D) { return f(B); } else { return f(E); } }
     """
 
     def __init__(
@@ -502,30 +506,23 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
             if not statement.has_else_block():
                 continue
 
-            # Check all branches end with an assignment to the same variable.
-            var_name: str | None = None
-            branch_values: list[frog_ast.Expression] = []
-            all_match = True
-            for blk in statement.blocks:
-                if not blk.statements:
-                    all_match = False
-                    break
-                last = blk.statements[-1]
-                if not (
-                    isinstance(last, frog_ast.Assignment)
-                    and isinstance(last.var, frog_ast.Variable)
-                ):
-                    all_match = False
-                    break
-                if var_name is None:
-                    var_name = last.var.name
-                elif last.var.name != var_name:
-                    all_match = False
-                    break
-                branch_values.append(last.value)
-
-            if not all_match or var_name is None:
+            # Check every leaf ends with an assignment to the same variable.
+            leaves = self._leaves(statement)
+            assigned = [
+                (leaf.var.name, leaf.value)
+                for leaf in leaves
+                if isinstance(leaf, frog_ast.Assignment)
+                and isinstance(leaf.var, frog_ast.Variable)
+            ]
+            names = {name for name, _ in assigned}
+            if len(names) != 1 or len(assigned) != len(leaves):
+                for name in sorted(names):
+                    self._report_unassigned_leaf(
+                        statement, name, block.statements[index + 1 :]
+                    )
                 continue
+            var_name = names.pop()
+            branch_values = [value for _, value in assigned]
 
             # F-159: the rewrite drops each branch's trailing `var = value`
             # store. If `var` is a game field, that store is observable across
@@ -600,20 +597,9 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
                 if _use_inside_loop(frog_ast.Block(list(subsequent)), var_name):
                     continue
 
-            # Build new blocks: for each branch, replace trailing assignment
-            # with subsequent statements where var is substituted by value
-            new_blocks: list[frog_ast.Block] = []
-            for blk_idx, blk in enumerate(statement.blocks):
-                prefix = list(blk.statements[:-1])
-                value = branch_values[blk_idx]
-                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                ast_map.set(frog_ast.Variable(var_name), copy.deepcopy(value))
-                substituted = SubstitutionTransformer(ast_map).transform(
-                    copy.deepcopy(frog_ast.Block(list(subsequent)))
-                )
-                new_blocks.append(frog_ast.Block(prefix + list(substituted.statements)))
-
-            new_if = frog_ast.IfStatement(list(statement.conditions), new_blocks)
+            # Replace each leaf's trailing assignment with the subsequent
+            # statements, var substituted by that leaf's value.
+            new_if = self._splice_tail(statement, var_name, list(subsequent))
             # Also remove the declaration of var_name before the if, if any
             prior = list(block.statements[:index])
             cleaned_prior: list[frog_ast.Statement] = []
@@ -625,6 +611,82 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
             return self.transform_block(frog_ast.Block(cleaned_prior + [new_if]))
 
         return block
+
+    @classmethod
+    def _leaves(
+        cls, statement: frog_ast.IfStatement
+    ) -> list[frog_ast.Statement | None]:
+        """Last statement of each leaf of an if-else tree (None if empty).
+
+        A branch ending in an if-else with an else block contributes that
+        if-else's leaves; any other branch is itself a leaf.
+        """
+        leaves: list[frog_ast.Statement | None] = []
+        for blk in statement.blocks:
+            last = blk.statements[-1] if blk.statements else None
+            if isinstance(last, frog_ast.IfStatement) and last.has_else_block():
+                leaves.extend(cls._leaves(last))
+            else:
+                leaves.append(last)
+        return leaves
+
+    @classmethod
+    def _splice_tail(
+        cls,
+        statement: frog_ast.IfStatement,
+        var_name: str,
+        subsequent: list[frog_ast.Statement],
+    ) -> frog_ast.IfStatement:
+        """Rebuild *statement* with every leaf assignment ``var = value``
+        replaced by *subsequent*, ``var`` substituted by ``value``."""
+        new_blocks: list[frog_ast.Block] = []
+        for blk in statement.blocks:
+            prefix = list(blk.statements[:-1])
+            last = blk.statements[-1]
+            if isinstance(last, frog_ast.IfStatement):
+                new_blocks.append(
+                    frog_ast.Block(
+                        prefix + [cls._splice_tail(last, var_name, subsequent)]
+                    )
+                )
+                continue
+            assert isinstance(last, frog_ast.Assignment)
+            ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            ast_map.set(frog_ast.Variable(var_name), copy.deepcopy(last.value))
+            substituted = SubstitutionTransformer(ast_map).transform(
+                copy.deepcopy(frog_ast.Block(list(subsequent)))
+            )
+            new_blocks.append(frog_ast.Block(prefix + list(substituted.statements)))
+        return frog_ast.IfStatement(list(statement.conditions), new_blocks)
+
+    def _report_unassigned_leaf(
+        self,
+        statement: frog_ast.IfStatement,
+        var_name: str,
+        subsequent: Sequence[frog_ast.Statement],
+    ) -> None:
+        """Near-miss: some leaves assign local *var_name*, which the tail
+        reads, but another leaf does not end in that assignment."""
+        if self.ctx is None or var_name in self._field_names:
+            return
+        if var_name not in referenced_variable_names(frog_ast.Block(list(subsequent))):
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="If-Split Branch Assignment",
+                reason=(
+                    f"Cannot split on '{var_name}': a branch of the if-else "
+                    f"does not end in an assignment to '{var_name}'"
+                ),
+                location=statement.origin,
+                suggestion=(
+                    f"End every branch (and every nested if-else leaf) "
+                    f"with an assignment to '{var_name}'"
+                ),
+                variable=var_name,
+                method=None,
+            )
+        )
 
 
 class InlineMultiUsePureExpressionTransformer(BlockTransformer):
