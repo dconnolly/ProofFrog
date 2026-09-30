@@ -69,7 +69,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | Pass | Description |
 |---|---|
 | RedundantCopy | Eliminates redundant variable copies (`Type v = w` where v replaces w). |
-| IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same variable. |
+| IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same local variable. A branch ending in a nested if-else counts when every leaf of that nested if-else ends in the assignment, so an inlined result slot (`if (c) { v = A; } else { s; if (d) { v = B; } else { v = E; } } if (v == None) ...`) becomes direct early returns. |
 | InlineSingleUseVariable | Inlines `Type v = expr` when v is used exactly once. |
 | DeduplicateDeterministicCalls | Extracts duplicate deterministic primitive calls into shared variables. |
 | ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
