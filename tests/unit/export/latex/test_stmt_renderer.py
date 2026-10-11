@@ -117,6 +117,32 @@ def test_numeric_for_emits_for_endfor() -> None:
     assert kinds == ["For", "Return", "EndFor"]
 
 
+def _for_header(end: frog_ast.Expression) -> str:
+    body = _block([frog_ast.ReturnStatement(frog_ast.Variable("i"))])
+    s = frog_ast.NumericFor("i", frog_ast.Integer(1), end, body)
+    line = _renderer().render_block(_block([s]))[0]
+    assert isinstance(line, ir.For)
+    return line.header
+
+
+def _binop(
+    op: frog_ast.BinaryOperators, left: frog_ast.Expression, k: int
+) -> frog_ast.Expression:
+    return frog_ast.BinaryOperation(op, left, frog_ast.Integer(k))
+
+
+def test_numeric_for_header_ends_at_last_value() -> None:
+    # `for (Int i = a to b)` stops before b (FROGLANG_REFERENCE 4.5), so the
+    # header shows b - 1, not b.
+    n = frog_ast.Variable("n")
+    add, sub = frog_ast.BinaryOperators.ADD, frog_ast.BinaryOperators.SUBTRACT
+    assert _for_header(frog_ast.Integer(5)) == r"i = 1 \dots 4"
+    assert _for_header(_binop(add, n, 1)).endswith(r"\dots n")
+    assert _for_header(_binop(add, n, 3)).endswith(r"\dots n + 2")
+    assert _for_header(_binop(sub, n, 1)).endswith(r"\dots n - 2")
+    assert _for_header(n).endswith(r"\dots n - 1")
+
+
 def test_funccall_statement_emits_raw() -> None:
     s = frog_ast.FuncCall(frog_ast.Variable("Foo"), [frog_ast.Variable("x")])
     [line] = _renderer().render_block(_block([s]))
@@ -153,7 +179,8 @@ def test_for_body_is_indented_one_level_deeper() -> None:
 
 def test_nested_if_inside_for_stacks_depth() -> None:
     inner_if = frog_ast.IfStatement(
-        [frog_ast.Variable("b")], [_block([frog_ast.ReturnStatement(frog_ast.Integer(1))])]
+        [frog_ast.Variable("b")],
+        [_block([frog_ast.ReturnStatement(frog_ast.Integer(1))])],
     )
     body = _block([inner_if])
     s = frog_ast.NumericFor("i", frog_ast.Integer(0), frog_ast.Integer(5), body)

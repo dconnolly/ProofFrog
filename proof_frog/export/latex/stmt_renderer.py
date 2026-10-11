@@ -42,6 +42,38 @@ def _is_predicate(expr: frog_ast.Expression) -> bool:
     return False
 
 
+def _last_value(end: frog_ast.Expression) -> frog_ast.Expression:
+    """The last value a numeric loop takes.
+
+    ``for (Int i = a to b)`` stops before ``b``, so a header ``a \\dots b``
+    would read as one iteration too many. Folds an integer ``end``, ``x + k``
+    and ``x - k``; otherwise renders ``end - 1``.
+    """
+    if isinstance(end, frog_ast.Integer):
+        return frog_ast.Integer(end.num - 1)
+    if isinstance(end, frog_ast.BinaryOperation) and isinstance(
+        end.right_expression, frog_ast.Integer
+    ):
+        k = end.right_expression.num
+        if end.operator == frog_ast.BinaryOperators.ADD:
+            if k == 1:
+                return end.left_expression
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.ADD,
+                end.left_expression,
+                frog_ast.Integer(k - 1),
+            )
+        if end.operator == frog_ast.BinaryOperators.SUBTRACT:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT,
+                end.left_expression,
+                frog_ast.Integer(k + 1),
+            )
+    return frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.SUBTRACT, end, frog_ast.Integer(1)
+    )
+
+
 class StmtRenderer:
     """Walk a ``Block`` of FrogLang statements and produce a flat list of IR lines.
 
@@ -136,7 +168,7 @@ class StmtRenderer:
         if isinstance(stmt, frog_ast.NumericFor):
             header = (
                 f"{stmt.name} = {self.expr.render(stmt.start)} "
-                f"\\dots {self.expr.render(stmt.end)}"
+                f"\\dots {self.expr.render(_last_value(stmt.end))}"
             )
             self._emit(out, ir.For(header=header))
             self._depth += 1
