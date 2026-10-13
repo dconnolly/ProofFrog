@@ -16,6 +16,9 @@ read-set.  Four attack shapes slipped past it (findings F-080, F-082, plus the
 - GCS-4: a loop binder (``for (Int x = ...)``) shadowing a guard variable is
   not an ``Assignment`` and is not scope-aware-substituted.
 
+The early-return attacks cover the membership fact after
+``if (x in S) { return ...; }``, which a write between the tests kills.
+
 Each attack must leave the inner re-test intact (pass declines).  The positive
 controls must still fold (the read/write scanner is complete, not blunt).
 """
@@ -112,6 +115,88 @@ ATTACKS = {
             }
         }
     """,
+    # Early-return fact: a write to S between the early return and the
+    # re-test kills the fact.
+    "early_return_then_write": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            S = S union d;
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # Early-return fact: a write inside a nested branch kills the fact.
+    "early_return_then_nested_write": """
+        Int O(Int e, Int d, Bool c, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            if (c) {
+                S = S union d;
+            }
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # Early-return fact: a write inside a loop kills the fact.
+    "early_return_then_loop_write": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            for (Int i = 0 to 2) {
+                S = S union d;
+            }
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # Early-return fact: <-uniq[S] grows S.
+    "early_return_then_uniq": """
+        Int O(BitString<1> e, Set<BitString<1>> S) {
+            if (e in S) {
+                return 0;
+            }
+            BitString<1> y <-uniq[S] BitString<1>;
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # Early-return fact: the element is reassigned.
+    "early_return_then_element_reassigned": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            e = d;
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # No fact: the guarded branch does not always return.
+    "no_fact_without_return": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                d = d + 1;
+            }
+            if (e in S) {
+                return d;
+            }
+            return 2;
+        }
+    """,
 }
 
 
@@ -183,6 +268,64 @@ CONTROLS = {
                 return 2;
             }
             return 0;
+        }
+    """,
+    # Early-return fact reaches a nested re-test.
+    "early_return_fact": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            d = d + 1;
+            if (d > 3) {
+                if (e in S) {
+                    return 1;
+                } else {
+                    return 2;
+                }
+            }
+            return 3;
+        }
+    """,
+    # A negated early return makes the membership true afterward.
+    "negated_early_return_fact": """
+        Int O(Int e, Set<Int> S) {
+            if (!(e in S)) {
+                return 0;
+            }
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+    """,
+    # A write to S after the re-test does not block the fold.
+    "write_after_retest": """
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                Int r = 0;
+                if (e in S) {
+                    r = 1;
+                }
+                S = S union d;
+                return r;
+            }
+            return 0;
+        }
+    """,
+    # A branch that writes S still sees the fact before its write.
+    "retest_before_write_in_branch": """
+        Int O(Int e, Int d, Bool c, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            if (c) {
+                if (e in S) {
+                    return 1;
+                }
+                S = S union d;
+            }
+            return 2;
         }
     """,
 }

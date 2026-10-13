@@ -19,10 +19,12 @@ from proof_frog.transforms.control_flow import (
     RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
+    GuardConditionSimplificationTransformer,
     IfToBooleanAssignment,
     IfFalseReturnToConjunction,
 )
 from proof_frog.transforms.inlining import (
+    IfSplitBranchAssignment,
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
@@ -3146,3 +3148,56 @@ def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
     assert not _dead_null_guard_unassigned_misses(
         "Void Initialize() { f = false; }", body
     )
+
+
+def test_if_split_near_miss_nested_leaf_unassigned():
+    """IfSplitBranchAssignment reports a near-miss when one nested leaf does
+    not assign the variable the other leaves assign and the tail reads."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Initialize() {
+                return 0;
+            }
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        b = b + 1;
+                    }
+                }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfSplitBranchAssignment().apply(game, ctx)
+    assert result == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "If-Split Branch Assignment"
+
+
+def test_guard_condition_near_miss_membership_fact_killed_by_write():
+    """GuardConditionSimplification reports a near-miss when a write to S
+    between an early return on `x in S` and a re-test kills the fact."""
+    method = frog_parser.parse_method("""
+        Int O(Int e, Int d, Set<Int> S) {
+            if (e in S) {
+                return 0;
+            }
+            S = S union d;
+            if (e in S) {
+                return 1;
+            }
+            return 2;
+        }
+        """)
+    ctx = _make_ctx()
+    GuardConditionSimplificationTransformer(ctx).transform(method)
+    misses = [nm for nm in ctx.near_misses if nm.variable == "e in S"]
+    assert misses
+    assert misses[0].transform_name == "Guard Condition Simplification"

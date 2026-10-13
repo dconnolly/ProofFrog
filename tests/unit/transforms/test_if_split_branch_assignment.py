@@ -183,6 +183,136 @@ from proof_frog.transforms.inlining import IfSplitBranchAssignmentTransformer
             }
             """,
         ),
+        # Nested if-else: every leaf assigns x, so the tail goes to each leaf.
+        (
+            """
+            Int f(Bool c, Bool d, Int a, Int b, Int e) {
+                Int x;
+                if (c) {
+                    x = a;
+                } else {
+                    e = e + 1;
+                    if (d) {
+                        x = b;
+                    } else {
+                        x = e;
+                    }
+                }
+                return x + 1;
+            }
+            """,
+            """
+            Int f(Bool c, Bool d, Int a, Int b, Int e) {
+                if (c) {
+                    return a + 1;
+                } else {
+                    e = e + 1;
+                    if (d) {
+                        return b + 1;
+                    } else {
+                        return e + 1;
+                    }
+                }
+            }
+            """,
+        ),
+        # No-op: a nested leaf does not assign x.
+        (
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        b = b + 1;
+                    }
+                }
+                return x;
+            }
+            """,
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        b = b + 1;
+                    }
+                }
+                return x;
+            }
+            """,
+        ),
+        # No-op: a nested leaf assigns another variable.
+        (
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                Int y = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        y = b;
+                    }
+                }
+                return x + y;
+            }
+            """,
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                Int y = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    } else {
+                        y = b;
+                    }
+                }
+                return x + y;
+            }
+            """,
+        ),
+        # No-op: a nested if without else leaves one path unassigned.
+        (
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    }
+                }
+                return x;
+            }
+            """,
+            """
+            Int f(Bool c, Bool d, Int a, Int b) {
+                Int x = 0;
+                if (c) {
+                    x = a;
+                } else {
+                    if (d) {
+                        x = b;
+                    }
+                }
+                return x;
+            }
+            """,
+        ),
     ],
     ids=[
         "basic_typed",
@@ -192,6 +322,10 @@ from proof_frog.transforms.inlining import IfSplitBranchAssignmentTransformer
         "no_op_no_subsequent",
         "removes_preceding_declaration",
         "no_op_element_write_to_var",
+        "nested_leaves",
+        "no_op_nested_leaf_unassigned",
+        "no_op_nested_leaf_other_var",
+        "no_op_nested_if_without_else",
     ],
 )
 def test_if_split_branch_assignment(
@@ -248,3 +382,28 @@ def test_f160_still_splits_when_free_var_stable() -> None:
     )
     out = str(IfSplitBranchAssignmentTransformer().transform(method))
     assert "x = y" not in out  # split: x substituted by its branch value
+
+
+def test_nested_declines_when_tail_writes_leaf_free_var() -> None:
+    """F-160 on a nested leaf: the tail rewrites `y`, which leaf value `y`
+    reads, so the split must decline."""
+    method = frog_parser.parse_method(
+        """
+        Int Oracle(Bool c, Bool d, Int y) {
+            Int x;
+            if (c) {
+                x = 0;
+            } else {
+                if (d) {
+                    x = y;
+                } else {
+                    x = 1;
+                }
+            }
+            y = y + 1;
+            return x * 100 + y;
+        }
+        """
+    )
+    out = str(IfSplitBranchAssignmentTransformer().transform(method))
+    assert "x = y" in out

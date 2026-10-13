@@ -69,7 +69,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | Pass | Description |
 |---|---|
 | RedundantCopy | Eliminates redundant variable copies (`Type v = w` where v replaces w). |
-| IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same variable. |
+| IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same local variable. A branch ending in a nested if-else counts when every leaf of that nested if-else ends in the assignment, so an inlined result slot (`if (c) { v = A; } else { s; if (d) { v = B; } else { v = E; } } if (v == None) ...`) becomes direct early returns. |
 | InlineSingleUseVariable | Inlines `Type v = expr` when v is used exactly once. |
 | DeduplicateDeterministicCalls | Extracts duplicate deterministic primitive calls into shared variables. |
 | ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
@@ -120,6 +120,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |
 | FoldLiteralConditions | Folds `!true`/`!false`, `<`/`>`/`<=`/`>=` on integer literals, `==`/`!=` on boolean literals or equal integer literals, and `None == L` / `None != L` when `L` is a tuple, set, integer, boolean, or bitstring literal whose evaluation cannot fail. That last fold drops the evaluation of `L`, so `L` may contain only literals, variables, field accesses and operators other than division (no call, index or slice), and every variable it reads must be definitely assigned there: a method parameter, a local in scope declared with a value or a loop binder, a field with an initializer or one `Initialize` assigns in a top-level statement before any `return` (read outside `Initialize`), a game parameter, or a `let:` name. A field assigned only by another oracle, a local declared bare (`T x;`), and a name bound more than once or shared by a local and a field all decline, with a near-miss naming the variable. Distinct integer literals under `==`/`!=` are left alone (they may be equal at `ModInt<q>`). `1 == 1` and `true == true` overlap with ReflexiveComparison. Runs just before BranchElimination. |
 | BranchElimination | Eliminates branches with statically known `true`/`false` conditions. |
+| GuardConditionSimplification | Replaces a deterministic if-condition by `true`/`false` inside its branches when the branch writes none of its variables. A membership guard `x in S` (or `!(x in S)`) also holds after an early return (`if (x in S) { return ...; }` makes it false afterward) and within a branch, up to the first write to `x` or `S` (plain, element/field, `<-uniq[S]`, loop binder, re-declaration). |
 | UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
 | ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |
 | SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |
